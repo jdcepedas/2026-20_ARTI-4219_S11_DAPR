@@ -13,17 +13,9 @@ spec:
       labels:
         app: order-subscriber
       annotations:
-        # ---------------------------------------------------------------------------
-        # TODO 4: Agregar las anotaciones de Dapr para habilitar la inyección del sidecar
-        # ---------------------------------------------------------------------------
-        # Sin estas anotaciones, el Pod se despliega sin sidecar y Dapr no sabrá
-        # de la existencia de esta aplicación.
-        #
-        # Las tres anotaciones mínimas necesarias son:
-        #
-        # Referencia: https://docs.dapr.io/reference/arguments-annotations-overview/
-        # ---------------------------------------------------------------------------
-        # TODO: Agregar las anotaciones aquí
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "order-subscriber"
+        dapr.io/app-port: "5001"
         
     spec:
       containers:
