@@ -5,6 +5,8 @@
 
 ### 1. Sin Dapr: ¿dónde vive el código de TTL y consumer group?
 
+#### Experimento para Redis
+
 Para la primera parte de esta prueba se definió una configuración de Dapr ttlInSeconds
 
 ```
@@ -123,6 +125,8 @@ jcepeda@Juans-MacBook-Pro 2026-20_ARTI-4219_S11_DAPR % kubectl logs -l app=order
 Aun configurado este nuevo parámetro para redis los mensajes siguen llegando todos los mensajes.
 Con Redis no se puede seguir el taller al pie de la letra usando solo la configuración. streamTTL solo borra mensajes cuando llega una publicación nueva. Si después de esperar nadie publica, los 3 mensajes siguen en Redis y el subscriber los recibe igual.
 
+
+
 Otra de las pruebas que se pueden realizar para evidenciar el comportamiento es enviar dos tandas de eventos:
 ```
 jcepeda@Juans-MacBook-Pro 2026-20_ARTI-4219_S11_DAPR % kubectl exec -n redis redis-master-0 -- redis-cli CONFIG SET stream-node-max-entries 1
@@ -233,18 +237,62 @@ kubectl delete -f 02-componentes-declarativos/rabbitmq.yaml
 
 ```
 
+#### Consumer group
+La solución para agregar un consumer group distinto por cada namespace de kubernetes sería la siguiente:
+```
+- name: consumerID
+  value: "{appID}-{namespace}"
+```
+
+Al arrancar, el sidecar reemplaza {appID} y {namespace}. El mismo order-subscriber queda con un consumer group distinto según el namespace donde corre:
+
+- en checkout → order-subscriber-checkout
+- en inventory → order-subscriber-inventory
+
+Cada grupo lleva su propia posición de lectura en el stream orders, así que cada equipo recibe el 100% de los mensajes
+
+#### Comparación de enfoques 
+
+- Para el caso de Kafka, este no tiene TTL por mensaje; solo tiene retention.ms, que borra el log por segmentos completos y no impide que se lean mensajes vencidos. La regla de los 2 minutos tendría que programarse en el loop de cada consumidor: comparar el timestamp del mensaje, descartarlo y hacer commit del offset. 
+
+- Consumer group: es el group.id en la configuración de cada consumidor. Si dos equipos usan el mismo nombre, Kafka los junta en un solo grupo y se reparten los mensajes, que es el problema del Reto 2. Se evita con convenciones de nombres o con ACLs de Kafka por prefijo.
+Responsable: el equipo de la app. Eso significa redesplegar todos los servicios para cambiar el SLA, sin garantía de que todos lo apliquen igual, y las colisiones solo se descubren en producción. Plataforma solo controla el broker.
+
+
 ### 2. El patrón sidecar como frontera de responsabilidad
 
-> _Tu respuesta aquí_
+En el patrón de sidecar el equipo de producto define el valor, es decier algo como "una orden deja de ser válida a los 120 s". Es una regla de negocio. Por otro lado, el equipo de plataforma define el cómo, con qué broker y con qué campo se hace cumplir esa regla. En el laboratorio, `ttlInSeconds` funciona en RabbitMQ y en Redis no; en Redis lo que hay es `streamTTL`. Plataforma también maneja la conexión, las credenciales, la durabilidad de las colas y la convención del `consumerID`.
+
+| Responsabilidad | Producto | Plataforma |
+|---|---|---|
+| Valor del TTL (SLA de 120 s) | **Dueño** | Consultado |
+| Campo y broker que lo implementan | Informado | **Dueño** |
+| Conexión, credenciales, `durable`, `deletedWhenUnused` | — | **Dueño** |
+| Convención `consumerID: "{appID}-{namespace}"` | Informado | **Dueño** |
+| Verificar que el TTL realmente se cumple | Aprueba el criterio | **Dueño** de la prueba |
+
+#### Ejemplo de implementación en GitOps
+
+1. El equipo de Plataforma publica una plantilla base del Component, por ejemplo con Helm, que expone un solo parámetro de negocio: `orderTtlSeconds`. Lo demás queda fijo en la plantilla.
+2. Producto pone el valor en el en su namespace mediante un Pull Request. Como los componentes de Dapr son por namespace, cada equipo puede tener su propio TTL sin afectar a los demás.
+3. **CODEOWNERS** divide la revisión: producto aprueba cambios a `orderTtlSeconds` y plataforma aprueba el resto del componente.
+4. Políticas de admisión (Kyverno u OPA) validan que el TTL esté en un rango permitido y que `consumerID` incluya `{namespace}`.
 
 ### 3. Limitaciones de la abstracción: ¿migración 100% transparente?
 
-No. Dapr unifica la API, pero cada broker se comporta distinto. Un caso concreto es el **TTL**:
+No. Dapr unifica la API para las aplicaciones: en este laboratorio el código Python del publisher y del subscriber nunca cambió, ni con Redis ni con RabbitMQ. Pero cada broker se comporta distinto, y el Component YAML no es portable. La limitación más clara es el TTL.
 
-- En Dapr, el TTL exacto se define **por mensaje**, con `metadata.ttlInSeconds` en la petición de publicación (decisión del publisher).
-- Probé `ttlInSeconds: "120"` en el Component de Redis y **no tuvo efecto**: los mensajes en el stream no traían el atributo `expiration` y se entregaron más de 14 horas después de publicarse.
-- Para Redis Streams, la opción declarativa es `streamTTL`, que elimina entradas viejas del stream. Es **aproximada** y se aplica cuando llega un mensaje nuevo.
-- Probé `streamTTL: "2m"`: publiqué 3 mensajes, esperé más de 2 minutos, publiqué 3 más y el stream seguía con 6 entradas, y el subscriber recibió mensajes de la primera tanda. En una prueba aparte en Redis, un recorte aproximado (`MINID ~`) no eliminó nada en un stream pequeño, mientras que el recorte exacto sí. Por eso `streamTTL` no sirve como TTL de entrega en este laboratorio.
-- En Azure Service Bus, en cambio, el TTL lo maneja el propio broker de forma nativa.
+Lo que mostró el laboratorio es el riesgo de llevar una regla de negocio a infraestructura. Con Redis, `ttlInSeconds: "120"` se aplicó sin errores (`component.dapr.io/order-pubsub configured`), pero no tuvo ningún efecto: producto habría creído que las órdenes expiraban a los 2 minutos y en realidad se procesaban todas. Por eso plataforma no puede limitarse a copiar el número al YAML; tiene que garantizar que el broker cumpla lo que producto pidió, y avisar cuando no puede.
 
-Por eso, migrar de Redis a otro broker exige revisar cómo se aplica el TTL y los consumer groups, aunque el código Python no cambie.
+Evidencia concreta con Redis:
+
+- Con `ttlInSeconds: "120"` en el componente, los mensajes en el stream no traían `expiration` y el subscriber los recibió todos después de la espera de 130 s.
+- Con `streamTTL: "2m"` y la configuración por defecto de Redis (`stream-node-max-entries = 100`), una segunda publicación no borró nada: el stream quedó con 6 entradas, porque el recorte aproximado (`~`) solo elimina nodos completos y los 6 mensajes cabían en uno.
+- Con `stream-node-max-entries = 1` y una segunda publicación después de la espera, sí se borraron los 3 mensajes viejos y el subscriber recibió solo los de la segunda tanda. Sin esa segunda publicación, los mensajes vencidos se entregan igual.
+
+Otras diferencias que aparecieron al cambiar de broker:
+
+- Durabilidad de la cola en RabbitMQ, con los valores por defecto, Dapr borra la cola del subscriber cuando este se apaga, y los mensajes publicados mientras tanto se pierden. Hubo que agregar `durable: "true"` y `deletedWhenUnused: "false"`, campos que no existen en Redis.
+- Consumer groups: `consumerID: "{appID}-{namespace}"` se traduce distinto en cada broker. En Redis es un consumer group del stream `orders`; en RabbitMQ es una cola propia por namespace (`order-subscriber-checkout-orders`). En Kafka sería un `group.id`, y el paralelismo de cada grupo queda limitado por el número de particiones del tópico.
+
+**Conclusión:** migrar de Redis a otro broker no exige tocar las aplicaciones, pero sí reescribir el Component YAML y volver a validar el comportamiento. Lo que no se puede asumir es que la misma intención de negocio ("las órdenes expiran a los 2 minutos") se cumpla igual en todos los brokers solo porque Dapr acepta la configuración.

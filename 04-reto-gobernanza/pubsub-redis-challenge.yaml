@@ -25,5 +25,7 @@ spec:
     #
     # Referencia: https://docs.dapr.io/operations/components/component-scopes/#namespaced-components
     # ---------------------------------------------------------------------------
-    # - name: ???
-    #   value: ???
+    # Dapr reemplaza {appID} y {namespace} en runtime: order-subscriber en el
+    # namespace checkout usa el consumer group "order-subscriber-checkout".
+    - name: consumerID
+      value: "{appID}-{namespace}"
