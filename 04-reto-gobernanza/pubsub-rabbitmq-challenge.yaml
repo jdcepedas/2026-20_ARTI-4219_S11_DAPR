@@ -1,0 +1,20 @@
+# Variante del reto de gobernanza con RabbitMQ en lugar de Redis.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: order-pubsub
+  namespace: default
+spec:
+  type: pubsub.rabbitmq
+  version: v1
+  metadata:
+    - name: connectionString
+      value: "amqp://lab:lab@rabbitmq.rabbitmq.svc.cluster.local:5672"
+
+    - name: durable
+      value: "true"
+    - name: deletedWhenUnused
+      value: "false"
+
+    - name: ttlInSeconds
+      value: "120"

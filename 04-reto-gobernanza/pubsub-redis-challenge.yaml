@@ -12,17 +12,9 @@ spec:
 
     - name: redisPassword
       value: ""
-
-    # ---------------------------------------------------------------------------
-    # TODO 1: Configurar Time-to-Live (TTL) para los mensajes
-    # ---------------------------------------------------------------------------
-    # Agrega una entrada de metadata para que los mensajes expiren
-    # automáticamente después de 120 segundos.
-    #
-    # Referencia: https://docs.dapr.io/developing-applications/building-blocks/pubsub/pubsub-message-ttl/
-    # ---------------------------------------------------------------------------
-    # - name: ???
-    #   value: ???
+      
+    - name: streamTTL
+      value: "2m"
 
     # ---------------------------------------------------------------------------
     # TODO 2: Configurar Consumer Group con Namespace para Multi-Tenancy
